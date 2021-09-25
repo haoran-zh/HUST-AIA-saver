@@ -1,0 +1,96 @@
+import rospy, cv2, cv_bridge, numpy, time
+from sensor_msgs.msg import Image
+from geometry_msgs.msg import Twist
+class PID:
+    def __init__(self, P , I , D ):
+        self.Kp = P
+        self.Ki = I
+        self.Kd = D
+        self.clear()
+        self.bridge = cv_bridge.CvBridge()
+        self.image_sub = rospy.Subscriber('camera/image_raw', 
+                                        Image, self.image_callback)
+        self.cmd_vel_pub = rospy.Publisher('/cmd_vel',
+                                        Twist, queue_size=1)                          
+        self.twist = Twist()
+
+    def clear(self):
+        self.current_time = time.time()
+        self.last_time = self.current_time
+        self.PTerm = 0.0
+        self.ITerm = 0.0
+        self.DTerm = 0.0
+        self.last_error = 0.0
+        self.output = 0.0
+
+    def image_callback(self, msg):
+        image = self.bridge.imgmsg_to_cv2(msg,desired_encoding='bgr8')
+        self.geterror(image)
+        self.update()
+        self.control()
+        #cv2.namedWindow("window", 1)
+        #cv2.imshow("window", image)
+        cv2.waitKey(3)
+    
+    def geterror(self,img):
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        lower_white = numpy.array([ 0,  0, 221])
+        upper_white = numpy.array([180, 30, 255])
+        mask1 = cv2.inRange(hsv, lower_white, upper_white)
+        mask2 = cv2.inRange(hsv, lower_white, upper_white)
+        search_top_1 = 3*h/4 + 20
+        search_bot_1 = 3*h/4 + 40
+        search_top_2 = 3*h/4 - 80
+        search_bot_2 = 3*h/4 - 60
+        mask1[0:search_top_1, 0:w] = 0
+        mask1[search_bot_1:h, 0:w] = 0
+        mask2[0:search_top_2, 0:w] = 0
+        mask2[search_bot_2:h, 0:w] = 0
+        M1 = cv2.moments(mask1)
+        M2 = cv2.moments(mask2)
+        if M1['m00'] > 0 and M2['m00'] > 0 :
+            cx1 = int(M1['m10']/M1['m00'])
+            cy1 = int(M1['m01']/M1['m00'])
+            cx2 = int(M2['m10']/M2['m00'])
+            cy2 = int(M2['m01']/M2['m00'])
+            cv2.circle(img, (cx1, cy1), 10, (0,0,255), -1)
+            cv2.circle(img, (cx2, cy2), 10, (0,0,255), -1)
+            k = 0.54
+            self.current_error = k*cx1+(1-k)*cx2-w/2
+        else:
+            err = self.last_error
+            self.clear()
+            self.current_error = err
+        
+    def update(self):
+        error = self.current_error
+        self.current_time = time.time()
+        delta_time = self.current_time - self.last_time
+        delta_error = error - self.last_error
+        self.PTerm = self.Kp * error
+        self.ITerm += error * delta_time
+        self.DTerm = 0.0
+        if delta_time > 0:
+            if delta_error * error > 0:
+                self.DTerm = delta_error / delta_time
+            else:
+                self.DTerm = 0.1*delta_error / delta_time
+        self.last_time = self.current_time
+        self.last_error = error
+        self.output = self.PTerm + self.Ki*self.ITerm + self.Kd*self.DTerm
+    
+    def control(self):
+        err = self.output
+        self.twist.linear.x = speed / ( 1 + err**2 / 200 )
+        self.twist.angular.z = float(err)
+        self.cmd_vel_pub.publish(self.twist)
+
+p = 0.046
+i = 0.004
+d = 0.0128
+speed = -2.0
+(w,h) = [1280,720]
+
+rospy.init_node('follower')
+follower = PID(p,i,d)
+rospy.spin()
